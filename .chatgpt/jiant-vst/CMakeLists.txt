@@ -52,6 +52,7 @@ target_compile_definitions(JIANTFM PRIVATE
     JUCE_USE_CURL=0
     JUCE_USE_WEBP=0
     JUCE_INCLUDE_WEBPLIB_CODE=0
+    JUCE_VST3_CAN_REPLACE_VST2=0
 )
 
 target_link_libraries(JIANTFM PRIVATE
