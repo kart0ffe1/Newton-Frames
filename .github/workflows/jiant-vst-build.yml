@@ -53,6 +53,9 @@ jobs:
       - name: Patch host-only POSIX helpers for Windows
         run: python .chatgpt/jiant-vst/patch_windows_host.py vstsrc/JIANT
 
+      - name: Fix editor initialization order
+        run: python .chatgpt/jiant-vst/fix_editor_init.py vstsrc/Plugin.cpp
+
       - uses: actions/download-artifact@v4
         with:
           name: jiant-generated-assets
