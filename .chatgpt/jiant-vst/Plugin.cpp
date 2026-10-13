@@ -17,10 +17,13 @@ void web_nor_erase(void);
 void web_seed(uint32_t s);
 void web_boot(void);
 void web_buttons(uint32_t labels);
+void web_keys(uint32_t mask);
 void web_enc(uint32_t role, int32_t n);
 void web_master(uint32_t v);
 uint32_t web_midi(uint32_t status, uint32_t d1, uint32_t d2);
 uint16_t* web_screen(void);
+uint32_t web_lit_keys(void);
+uint32_t web_mid_keys(void);
 uint32_t web_sample_rate(void);
 }
 
@@ -30,7 +33,9 @@ juce::CriticalSection gCoreLock;
 bool gCoreBooted = false;
 
 constexpr int kKnobCount = 8;
-constexpr int kButtonCount = 12;
+constexpr int kButtonCount = 14;
+constexpr int kKeyCount = 27;
+constexpr int kPhysicalBaseNote = 53; // F3 ... G5, exactly as JIANT's web host exposes it.
 constexpr int kScreenW = 240;
 constexpr int kScreenH = 240;
 constexpr size_t kSourceRing = 262144;
@@ -43,15 +48,34 @@ constexpr std::array<const char*, kKnobCount> kKnobLabels {
     "MASTER", "SELECT", "PRESETS", "ALGORITHM", "KNOB 1", "KNOB 2", "KNOB 3", "KNOB 4"
 };
 
+// These are JIANT's native panel label indices from firmware/src/panel.c.
 constexpr std::array<const char*, kButtonCount> kButtonLabels {
     "FX", "SCL", "ENV", "LFO", "EDIT", "GLO",
-    "HOME", "SAVE", "ARP", "SEQ", "PLAY", "REC"
+    "HOME", "SAVE", "ARP", "SEQ", "PLAY", "REC", "OCT-", "OCT+"
 };
 
 juce::Colour thermalPink()   { return juce::Colour::fromRGB (255, 88, 132); }
 juce::Colour thermalAmber()  { return juce::Colour::fromRGB (255, 199, 100); }
-juce::Colour thermalViolet() { return juce::Colour::fromRGB (88, 48, 114); }
-juce::Colour panelBlack()    { return juce::Colour::fromRGB (9, 7, 14); }
+juce::Colour warmWhite()     { return juce::Colour::fromRGB (255, 244, 216); }
+juce::Colour panelBlack()    { return juce::Colour::fromRGB (29, 29, 31); }
+juce::Colour insetBlack()    { return juce::Colour::fromRGB (18, 18, 20); }
+juce::Colour controlGrey()   { return juce::Colour::fromRGB (55, 54, 52); }
+juce::Colour outlineGrey()   { return juce::Colour::fromRGB (58, 58, 63); }
+
+bool isBlackPitchClass (int note)
+{
+    const int pc = ((note % 12) + 12) % 12;
+    return pc == 1 || pc == 3 || pc == 6 || pc == 8 || pc == 10;
+}
+
+int foldMidiNoteToPhysicalKey (int note)
+{
+    while (note < kPhysicalBaseNote)
+        note += 12;
+    while (note >= kPhysicalBaseNote + kKeyCount)
+        note -= 12;
+    return juce::jlimit (0, kKeyCount - 1, note - kPhysicalBaseNote);
+}
 }
 
 class JiantEditor;
@@ -67,6 +91,8 @@ public:
             v.store (0.5f);
         knobUi[0].store (700.0f / 1023.0f);
         lastLaunchkeyCc.fill (-1);
+        for (auto& n : midiNotes)
+            n.store (0);
     }
 
     const juce::String getName() const override { return JucePlugin_Name; }
@@ -253,11 +279,47 @@ public:
         web_buttons (buttonMask.load());
     }
 
-    void copyScreen (std::array<uint16_t, kScreenW * kScreenH>& dst)
+    void setKeyFromUi (int index, bool down)
+    {
+        if (!juce::isPositiveAndBelow (index, kKeyCount))
+            return;
+
+        const uint32_t bit = 1u << static_cast<uint32_t> (index);
+        if (down)
+            physicalKeyMask.fetch_or (bit);
+        else
+            physicalKeyMask.fetch_and (~bit);
+
+        const juce::ScopedLock lock (gCoreLock);
+        ensureCoreBootedLocked();
+        web_keys (physicalKeyMask.load());
+    }
+
+    uint32_t getPhysicalKeyMask() const
+    {
+        return physicalKeyMask.load();
+    }
+
+    uint32_t getMidiVisualKeyMask() const
+    {
+        uint32_t mask = 0;
+        for (int note = 0; note < 128; ++note)
+        {
+            if (midiNotes[static_cast<size_t> (note)].load() != 0)
+            {
+                const int key = foldMidiNoteToPhysicalKey (note);
+                mask |= 1u << static_cast<uint32_t> (key);
+            }
+        }
+        return mask;
+    }
+
+    void copyUiFrame (std::array<uint16_t, kScreenW * kScreenH>& dst, uint32_t& litKeys)
     {
         const juce::ScopedLock lock (gCoreLock);
         ensureCoreBootedLocked();
         std::memcpy (dst.data(), web_screen(), dst.size() * sizeof (uint16_t));
+        litKeys = (web_lit_keys() | web_mid_keys()) & ((1u << kKeyCount) - 1u);
     }
 
 private:
@@ -328,6 +390,12 @@ private:
             }
         }
 
+        // Visual keyboard feedback follows musical incoming MIDI, independent of channel.
+        if (m.isNoteOn())
+            midiNotes[static_cast<size_t> (m.getNoteNumber())].store (1);
+        else if (m.isNoteOff())
+            midiNotes[static_cast<size_t> (m.getNoteNumber())].store (0);
+
         // Everything else stays musical MIDI and is fed straight to JIANT.
         const auto* raw = m.getRawData();
         const int rawSize = m.getRawDataSize();
@@ -345,7 +413,9 @@ private:
     double sourcePhase = 0.0;
     std::array<std::atomic<float>, kKnobCount> knobUi;
     std::array<int, kKnobCount> lastLaunchkeyCc;
+    std::array<std::atomic<uint8_t>, 128> midiNotes;
     std::atomic<uint32_t> buttonMask { 0 };
+    std::atomic<uint32_t> physicalKeyMask { 0 };
     std::vector<uint8_t> pendingFlash;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (JiantProcessor)
@@ -356,26 +426,225 @@ class JiantLookAndFeel final : public juce::LookAndFeel_V4
 public:
     JiantLookAndFeel()
     {
-        setColour (juce::Slider::rotarySliderFillColourId, thermalPink());
-        setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour::fromRGB (38, 22, 48));
-        setColour (juce::Slider::thumbColourId, thermalAmber());
-        setColour (juce::TextButton::buttonColourId, juce::Colour::fromRGB (30, 18, 39));
-        setColour (juce::TextButton::buttonOnColourId, thermalPink().withAlpha (0.72f));
-        setColour (juce::TextButton::textColourOffId, juce::Colours::white.withAlpha (0.88f));
-        setColour (juce::TextButton::textColourOnId, juce::Colours::white);
+        setColour (juce::TextButton::textColourOffId, juce::Colours::white.withAlpha (0.92f));
+        setColour (juce::TextButton::textColourOnId, panelBlack());
     }
+
+    void drawRotarySlider (juce::Graphics& g, int x, int y, int width, int height,
+                           float sliderPosProportional, float rotaryStartAngle,
+                           float rotaryEndAngle, juce::Slider&) override
+    {
+        auto bounds = juce::Rectangle<float> (static_cast<float> (x), static_cast<float> (y),
+                                               static_cast<float> (width), static_cast<float> (height)).reduced (5.0f);
+        const float diameter = juce::jmin (bounds.getWidth(), bounds.getHeight());
+        auto knob = juce::Rectangle<float> (0.0f, 0.0f, diameter, diameter).withCentre (bounds.getCentre());
+
+        g.setColour (juce::Colour::fromRGB (11, 11, 13));
+        g.fillEllipse (knob.expanded (3.0f));
+        g.setColour (juce::Colour::fromRGB (45, 45, 48));
+        g.fillEllipse (knob);
+        g.setColour (outlineGrey());
+        g.drawEllipse (knob, 1.6f);
+
+        const float angle = rotaryStartAngle + sliderPosProportional * (rotaryEndAngle - rotaryStartAngle);
+        const auto centre = knob.getCentre();
+        const float radius = knob.getWidth() * 0.5f;
+        const juce::Point<float> p1 (centre.x + std::sin (angle) * radius * 0.30f,
+                                     centre.y - std::cos (angle) * radius * 0.30f);
+        const juce::Point<float> p2 (centre.x + std::sin (angle) * radius * 0.72f,
+                                     centre.y - std::cos (angle) * radius * 0.72f);
+        g.setColour (warmWhite());
+        g.drawLine ({ p1, p2 }, 3.0f);
+    }
+
+    void drawButtonBackground (juce::Graphics& g, juce::Button& button,
+                               const juce::Colour&, bool isHighlighted, bool isButtonDown) override
+    {
+        auto r = button.getLocalBounds().toFloat().reduced (1.0f);
+        auto fill = controlGrey();
+        if (isButtonDown)
+            fill = warmWhite();
+        else if (isHighlighted)
+            fill = fill.brighter (0.08f);
+
+        g.setColour (fill);
+        g.fillRoundedRectangle (r, 7.0f);
+        g.setColour (juce::Colours::black.withAlpha (0.30f));
+        g.drawRoundedRectangle (r, 7.0f, 1.0f);
+    }
+
+    void drawButtonText (juce::Graphics& g, juce::TextButton& button,
+                         bool, bool isButtonDown) override
+    {
+        g.setFont (juce::FontOptions (12.5f, juce::Font::bold));
+        auto colour = button.findColour (juce::TextButton::textColourOffId);
+        if (isButtonDown)
+            colour = panelBlack();
+        g.setColour (colour);
+        g.drawFittedText (button.getButtonText(), button.getLocalBounds().reduced (3),
+                          juce::Justification::centred, 2);
+    }
+};
+
+class JiantTouchKeyboard final : public juce::Component
+{
+public:
+    explicit JiantTouchKeyboard (JiantProcessor& p) : processor (p)
+    {
+        setMouseCursor (juce::MouseCursor::PointingHandCursor);
+    }
+
+    ~JiantTouchKeyboard() override
+    {
+        releaseMouseKey();
+    }
+
+    void setActivityMasks (uint32_t physical, uint32_t midi, uint32_t leds)
+    {
+        physical &= ((1u << kKeyCount) - 1u);
+        midi &= ((1u << kKeyCount) - 1u);
+        leds &= ((1u << kKeyCount) - 1u);
+        if (physical != physicalMask || midi != midiMask || leds != ledMask)
+        {
+            physicalMask = physical;
+            midiMask = midi;
+            ledMask = leds;
+            repaint();
+        }
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto panel = getLocalBounds().toFloat();
+        g.setColour (insetBlack());
+        g.fillRoundedRectangle (panel, 18.0f);
+
+        for (int i = 0; i < kKeyCount; ++i)
+        {
+            const uint32_t bit = 1u << static_cast<uint32_t> (i);
+            const bool mouseActive = (physicalMask & bit) != 0;
+            const bool midiActive = (midiMask & bit) != 0;
+            const bool firmwareLit = (ledMask & bit) != 0;
+            const auto r = keyBounds[static_cast<size_t> (i)];
+
+            g.setColour ((mouseActive || midiActive) ? juce::Colour::fromRGB (25, 24, 26)
+                                                      : juce::Colour::fromRGB (13, 13, 15));
+            g.fillRoundedRectangle (r, r.getWidth() * 0.45f);
+            g.setColour ((mouseActive || midiActive) ? thermalPink().withAlpha (0.70f) : outlineGrey());
+            g.drawRoundedRectangle (r, r.getWidth() * 0.45f, 1.3f);
+
+            const float barW = juce::jmax (4.0f, r.getWidth() * 0.13f);
+            auto bar = juce::Rectangle<float> (barW, r.getHeight() * 0.66f)
+                           .withCentre (r.getCentre());
+
+            if (mouseActive)
+                g.setColour (warmWhite());
+            else if (midiActive)
+                g.setColour (thermalPink());
+            else if (firmwareLit)
+                g.setColour (thermalAmber());
+            else
+                g.setColour (juce::Colour::fromRGB (135, 134, 136));
+            g.fillRoundedRectangle (bar, barW * 0.5f);
+        }
+    }
+
+    void resized() override
+    {
+        for (auto& r : keyBounds)
+            r = {};
+
+        auto area = getLocalBounds().toFloat().reduced (18.0f, 12.0f);
+        int naturalCount = 0;
+        for (int i = 0; i < kKeyCount; ++i)
+            if (!isBlackPitchClass (kPhysicalBaseNote + i))
+                ++naturalCount;
+
+        const float step = area.getWidth() / static_cast<float> (naturalCount);
+        const float naturalW = juce::jmin (48.0f, step * 0.72f);
+        const float blackW = juce::jmin (44.0f, step * 0.62f);
+        const float topY = area.getY();
+        const float topH = area.getHeight() * 0.44f;
+        const float bottomY = area.getY() + area.getHeight() * 0.54f;
+        const float bottomH = area.getBottom() - bottomY;
+
+        int naturalsBefore = 0;
+        for (int i = 0; i < kKeyCount; ++i)
+        {
+            const int note = kPhysicalBaseNote + i;
+            if (isBlackPitchClass (note))
+            {
+                const float cx = area.getX() + static_cast<float> (naturalsBefore) * step;
+                keyBounds[static_cast<size_t> (i)] = juce::Rectangle<float> (blackW, topH)
+                                                        .withCentre ({ cx, topY + topH * 0.5f });
+            }
+            else
+            {
+                const float cx = area.getX() + (static_cast<float> (naturalsBefore) + 0.5f) * step;
+                keyBounds[static_cast<size_t> (i)] = juce::Rectangle<float> (naturalW, bottomH)
+                                                        .withCentre ({ cx, bottomY + bottomH * 0.5f });
+                ++naturalsBefore;
+            }
+        }
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        moveMouseKeyTo (keyAt (e.position));
+    }
+
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        moveMouseKeyTo (keyAt (e.position));
+    }
+
+    void mouseUp (const juce::MouseEvent&) override
+    {
+        releaseMouseKey();
+    }
+
+private:
+    int keyAt (juce::Point<float> p) const
+    {
+        for (int i = 0; i < kKeyCount; ++i)
+            if (keyBounds[static_cast<size_t> (i)].contains (p))
+                return i;
+        return -1;
+    }
+
+    void moveMouseKeyTo (int key)
+    {
+        if (key == mouseKey)
+            return;
+        if (mouseKey >= 0)
+            processor.setKeyFromUi (mouseKey, false);
+        mouseKey = key;
+        if (mouseKey >= 0)
+            processor.setKeyFromUi (mouseKey, true);
+    }
+
+    void releaseMouseKey()
+    {
+        if (mouseKey >= 0)
+            processor.setKeyFromUi (mouseKey, false);
+        mouseKey = -1;
+    }
+
+    JiantProcessor& processor;
+    std::array<juce::Rectangle<float>, kKeyCount> keyBounds {};
+    uint32_t physicalMask = 0;
+    uint32_t midiMask = 0;
+    uint32_t ledMask = 0;
+    int mouseKey = -1;
 };
 
 class JiantEditor final : public juce::AudioProcessorEditor, private juce::Timer
 {
 public:
     explicit JiantEditor (JiantProcessor& p)
-        : AudioProcessorEditor (&p), processor (p), screen (juce::Image::RGB, kScreenW, kScreenH, true)
+        : AudioProcessorEditor (&p), processor (p), screen (juce::Image::RGB, kScreenW, kScreenH, true), touchKeyboard (p)
     {
         setLookAndFeel (&look);
-        setSize (1040, 650);
-        setResizable (true, true);
-        setResizeLimits (850, 560, 1500, 950);
 
         for (int i = 0; i < kKnobCount; ++i)
         {
@@ -394,7 +663,7 @@ public:
             auto label = std::make_unique<juce::Label>();
             label->setText (kKnobLabels[static_cast<size_t> (i)], juce::dontSendNotification);
             label->setJustificationType (juce::Justification::centred);
-            label->setColour (juce::Label::textColourId, juce::Colours::white.withAlpha (0.82f));
+            label->setColour (juce::Label::textColourId, juce::Colours::white.withAlpha (0.92f));
             label->setFont (juce::FontOptions (13.0f, juce::Font::bold));
             addAndMakeVisible (*label);
             knobLabels.push_back (std::move (label));
@@ -404,6 +673,8 @@ public:
         {
             auto button = std::make_unique<juce::TextButton> (kButtonLabels[static_cast<size_t> (i)]);
             button->setClickingTogglesState (false);
+            button->setColour (juce::TextButton::textColourOffId,
+                               i == 11 ? juce::Colour::fromRGB (255, 72, 72) : juce::Colours::white.withAlpha (0.94f));
             button->onStateChange = [this, i, b = button.get()] {
                 processor.setButtonFromUi (i, b->isDown());
             };
@@ -411,6 +682,12 @@ public:
             buttons.push_back (std::move (button));
         }
 
+        addAndMakeVisible (touchKeyboard);
+
+        // Keep setSize last. JUCE may synchronously call resized().
+        setResizable (true, true);
+        setResizeLimits (900, 580, 1600, 1000);
+        setSize (1080, 680);
         startTimerHz (30);
     }
 
@@ -422,88 +699,120 @@ public:
 
     void paint (juce::Graphics& g) override
     {
-        const auto bounds = getLocalBounds().toFloat();
-        juce::ColourGradient bg (panelBlack(), 0.0f, 0.0f,
-                                 juce::Colour::fromRGB (35, 12, 45), bounds.getWidth(), bounds.getHeight(), false);
-        bg.addColour (0.55, juce::Colour::fromRGB (18, 8, 28));
-        g.setGradientFill (bg);
-        g.fillAll();
+        g.fillAll (juce::Colour::fromRGB (150, 150, 153));
 
-        g.setColour (thermalPink().withAlpha (0.16f));
-        g.fillEllipse (bounds.getWidth() - 320.0f, -130.0f, 430.0f, 430.0f);
-        g.setColour (thermalAmber().withAlpha (0.08f));
-        g.fillEllipse (-130.0f, bounds.getHeight() - 220.0f, 420.0f, 420.0f);
+        auto body = panelBounds.toFloat();
+        g.setColour (panelBlack());
+        g.fillRoundedRectangle (body, 39.0f);
 
-        g.setColour (juce::Colours::white);
-        g.setFont (juce::FontOptions (31.0f, juce::Font::bold));
-        g.drawText ("JIANT FM", 28, 13, 300, 40, juce::Justification::centredLeft);
-        g.setColour (thermalAmber());
-        g.setFont (juce::FontOptions (12.5f));
-        g.drawText ("NATIVE FIRMWARE • VST3", 206, 23, 260, 24, juce::Justification::centredLeft);
+        if (!octavePanelBounds.isEmpty())
+        {
+            g.setColour (insetBlack());
+            g.fillRoundedRectangle (octavePanelBounds.toFloat(), 12.0f);
+        }
+        if (!functionPanelBounds.isEmpty())
+        {
+            g.setColour (insetBlack());
+            g.fillRoundedRectangle (functionPanelBounds.toFloat(), 14.0f);
+        }
 
         auto display = displayBounds.toFloat();
-        g.setColour (thermalPink().withAlpha (0.35f));
-        g.fillRoundedRectangle (display.expanded (7.0f), 13.0f);
-        g.setColour (juce::Colour::fromRGB (3, 3, 5));
-        g.fillRoundedRectangle (display.expanded (4.0f), 10.0f);
+        g.setColour (juce::Colour::fromRGB (8, 8, 10));
+        g.fillRoundedRectangle (display.expanded (9.0f), 16.0f);
+        g.setColour (juce::Colour::fromRGB (2, 2, 4));
+        g.fillRoundedRectangle (display.expanded (3.0f), 10.0f);
         g.drawImageWithin (screen, displayBounds.getX(), displayBounds.getY(), displayBounds.getWidth(), displayBounds.getHeight(),
                            juce::RectanglePlacement::centred | juce::RectanglePlacement::stretchToFit, false);
-
-        g.setColour (juce::Colours::white.withAlpha (0.62f));
-        g.setFont (juce::FontOptions (11.5f));
-        g.drawFittedText ("Launchkey: Encoders CH16 CC21–28  •  Pads CH10: 44–49 / 36–41  •  Keyboard MIDI passes directly to JIANT",
-                          footerBounds, juce::Justification::centred, 1);
     }
 
     void resized() override
     {
-        auto area = getLocalBounds().reduced (28);
-        area.removeFromTop (42);
-        footerBounds = area.removeFromBottom (28);
-        area.removeFromBottom (8);
+        if (knobs.size() != kKnobCount || knobLabels.size() != kKnobCount || buttons.size() != kButtonCount)
+            return;
 
-        const int leftWidth = juce::jmin (520, static_cast<int> (area.getWidth() * 0.54f));
-        auto left = area.removeFromLeft (leftWidth);
-        area.removeFromLeft (22);
-        auto right = area;
+        panelBounds = getLocalBounds().reduced (16);
+        auto inner = panelBounds.reduced (32, 27);
 
-        const int displaySize = juce::jmin (left.getWidth() - 10, left.getHeight() - 150);
-        displayBounds = juce::Rectangle<int> (left.getX() + (left.getWidth() - displaySize) / 2,
-                                              left.getY() + 8,
-                                              displaySize, displaySize);
+        const int keyboardH = juce::jlimit (190, 310, static_cast<int> (std::lround (inner.getHeight() * 0.44)));
+        auto keyboardArea = inner.removeFromBottom (keyboardH);
+        inner.removeFromBottom (18);
+        touchKeyboard.setBounds (keyboardArea);
 
-        auto buttonArea = left.withTop (displayBounds.getBottom() + 24);
-        const int gap = 6;
-        const int bw = (buttonArea.getWidth() - 5 * gap) / 6;
-        const int bh = juce::jmin (38, (buttonArea.getHeight() - gap) / 2);
+        auto top = inner;
+        const int gap = juce::jlimit (12, 24, top.getWidth() / 55);
+        const int leftW = juce::jlimit (200, 280, static_cast<int> (std::lround (top.getWidth() * 0.245)));
+        const int displayW = juce::jlimit (205, 295, static_cast<int> (std::lround (top.getWidth() * 0.27)));
+
+        auto left = top.removeFromLeft (leftW);
+        top.removeFromLeft (gap);
+        auto displayArea = top.removeFromLeft (juce::jmin (displayW, top.getWidth()));
+        top.removeFromLeft (juce::jmin (gap, top.getWidth()));
+        auto right = top;
+
+        const int displaySize = juce::jmin (displayArea.getWidth() - 4, displayArea.getHeight() - 4);
+        displayBounds = juce::Rectangle<int> (displaySize, displaySize).withCentre (displayArea.getCentre());
+
+        // Left side: MASTER/SELECT, PRESETS/ALGORITHM, then native OCT-/OCT+.
+        octavePanelBounds = left.removeFromBottom (55);
+        left.removeFromBottom (8);
+        const int leftCellW = left.getWidth() / 2;
+        const int leftCellH = left.getHeight() / 2;
+        for (int i = 0; i < 4; ++i)
+        {
+            const int col = i % 2;
+            const int row = i / 2;
+            auto cell = juce::Rectangle<int> (left.getX() + col * leftCellW,
+                                               left.getY() + row * leftCellH,
+                                               leftCellW, leftCellH).reduced (5);
+            auto label = cell.removeFromTop (24);
+            knobLabels[static_cast<size_t> (i)]->setBounds (label);
+            knobs[static_cast<size_t> (i)]->setBounds (cell.reduced (8, 1));
+        }
+
+        auto oct = octavePanelBounds.reduced (10, 8);
+        const int octGap = 12;
+        const int octW = (oct.getWidth() - octGap) / 2;
+        buttons[12]->setBounds (oct.removeFromLeft (octW));
+        oct.removeFromLeft (octGap);
+        buttons[13]->setBounds (oct);
+
+        // Right side: K1..K4 on top, then the 12 function buttons in two rows.
+        const int knobRowH = juce::jlimit (105, 145, static_cast<int> (std::lround (right.getHeight() * 0.43)));
+        auto knobRow = right.removeFromTop (knobRowH);
+        right.removeFromTop (8);
+        functionPanelBounds = right;
+
+        const int rightCellW = juce::jmax (1, knobRow.getWidth() / 4);
+        for (int i = 4; i < 8; ++i)
+        {
+            const int col = i - 4;
+            auto cell = juce::Rectangle<int> (knobRow.getX() + col * rightCellW,
+                                               knobRow.getY(), rightCellW, knobRow.getHeight()).reduced (4);
+            auto label = cell.removeFromTop (24);
+            knobLabels[static_cast<size_t> (i)]->setBounds (label);
+            knobs[static_cast<size_t> (i)]->setBounds (cell.reduced (7, 1));
+        }
+
+        auto buttonArea = functionPanelBounds.reduced (12, 12);
+        const int buttonGap = 6;
+        const int bw = juce::jmax (1, (buttonArea.getWidth() - 5 * buttonGap) / 6);
+        const int bh = juce::jmax (1, (buttonArea.getHeight() - buttonGap) / 2);
         for (int row = 0; row < 2; ++row)
             for (int col = 0; col < 6; ++col)
             {
                 const int i = row * 6 + col;
-                buttons[static_cast<size_t> (i)]->setBounds (buttonArea.getX() + col * (bw + gap),
-                                                              buttonArea.getY() + row * (bh + gap), bw, bh);
+                buttons[static_cast<size_t> (i)]->setBounds (buttonArea.getX() + col * (bw + buttonGap),
+                                                              buttonArea.getY() + row * (bh + buttonGap), bw, bh);
             }
-
-        const int cols = 2;
-        const int rows = 4;
-        const int cellW = right.getWidth() / cols;
-        const int cellH = right.getHeight() / rows;
-        for (int i = 0; i < kKnobCount; ++i)
-        {
-            const int col = i % cols;
-            const int row = i / cols;
-            auto cell = juce::Rectangle<int> (right.getX() + col * cellW, right.getY() + row * cellH, cellW, cellH).reduced (8);
-            auto label = cell.removeFromBottom (23);
-            knobs[static_cast<size_t> (i)]->setBounds (cell.reduced (8, 0));
-            knobLabels[static_cast<size_t> (i)]->setBounds (label);
-        }
     }
 
 private:
     void timerCallback() override
     {
         std::array<uint16_t, kScreenW * kScreenH> raw {};
-        processor.copyScreen (raw);
+        uint32_t litKeys = 0;
+        processor.copyUiFrame (raw, litKeys);
+
         for (int y = 0; y < kScreenH; ++y)
         {
             for (int x = 0; x < kScreenW; ++x)
@@ -516,14 +825,23 @@ private:
                 screen.setPixelAt (x, y, juce::Colour::fromRGB (r, g, b));
             }
         }
-        repaint (displayBounds.expanded (8));
+
+        // Keep the GUI knobs visually in sync when the Launchkey moves them.
+        for (int i = 0; i < kKnobCount; ++i)
+            knobs[static_cast<size_t> (i)]->setValue (processor.getKnobUi (i), juce::dontSendNotification);
+
+        touchKeyboard.setActivityMasks (processor.getPhysicalKeyMask(), processor.getMidiVisualKeyMask(), litKeys);
+        repaint (displayBounds.expanded (10));
     }
 
     JiantProcessor& processor;
     JiantLookAndFeel look;
     juce::Image screen;
+    JiantTouchKeyboard touchKeyboard;
+    juce::Rectangle<int> panelBounds;
     juce::Rectangle<int> displayBounds;
-    juce::Rectangle<int> footerBounds;
+    juce::Rectangle<int> octavePanelBounds;
+    juce::Rectangle<int> functionPanelBounds;
     std::vector<std::unique_ptr<juce::Slider>> knobs;
     std::vector<std::unique_ptr<juce::Label>> knobLabels;
     std::vector<std::unique_ptr<juce::TextButton>> buttons;
