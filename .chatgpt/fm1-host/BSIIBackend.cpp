@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 namespace {
@@ -38,6 +39,7 @@ struct Voice {
     int ampStage = 0, modStage = 0; // 0 off,1 atk,2 dec,3 sus,4 rel
     float currentHz = 130.8128f;
     float targetHz = 130.8128f;
+    // TPT/ZDF SVF integrator-equivalent states. bp is ic1eq, lp1 is ic2eq.
     float lp1 = 0, lp2 = 0, bp = 0;
 };
 
@@ -117,6 +119,7 @@ void noteOff(int n){ if(n==voice.note){voice.gate=false;voice.ampStage=4;voice.m
 void handleButtons(uint32_t now){ uint32_t pressed=now & ~prevButtonState; prevButtonState=now; if(pressed&(1u<<6))page=0; if(pressed&(1u<<1))page=(page==1?2:1); if(pressed&(1u<<4))page=3; if(pressed&(1u<<0))page=(page==4?5:4); if(pressed&(1u<<2))page=(page==6?7:6); if(pressed&(1u<<3))page=8; if(pressed&(1u<<7))savePreset(); if(pressed&(1u<<12)) voice.note-=12,voice.targetHz=midiHz(voice.note); if(pressed&(1u<<13)) voice.note+=12,voice.targetHz=midiHz(voice.note); drawScreen(); }
 
 float rangeMul(uint8_t v){ int idx=std::clamp(int(v)*4/128,0,3); static float m[4]={0.25f,0.5f,1.0f,2.0f}; return m[idx]; }
+void resetFilter(){ voice.lp1=0.0f; voice.lp2=0.0f; voice.bp=0.0f; }
 float renderOne(){
     stepEnv(voice.envAmp,voice.ampStage,current.p,P_AMP_A); stepEnv(voice.envMod,voice.modStage,current.p,P_MOD_A);
     float glide=current.p[P_GLIDE]/127.0f; if(glide>0){ float tau=0.01f+2.5f*glide*glide; voice.currentHz += (voice.targetHz-voice.currentHz)*(1.0f/(tau*kRate)); }
@@ -124,8 +127,54 @@ float renderOne(){
     float pitchLfo=l1*(current.p[P_LFO1_DEPTH]/127.0f)*0.5f; float hz1=voice.currentHz*rangeMul(current.p[P_OSC1_RANGE])*std::pow(2.0f,((int(current.p[P_OSC1_COARSE])-64)/12.0f)+((int(current.p[P_OSC1_FINE])-64)/1200.0f)+pitchLfo/12.0f); float hz2=voice.currentHz*rangeMul(current.p[P_OSC2_RANGE])*std::pow(2.0f,((int(current.p[P_OSC2_COARSE])-64)/12.0f)+((int(current.p[P_OSC2_FINE])-64)/1200.0f)-pitchLfo/12.0f);
     int w1=std::min(3,int(current.p[P_OSC1_WAVE]/32)),w2=std::min(3,int(current.p[P_OSC2_WAVE]/32)); float a=osc(w1,voice.phase1,hz1),b=osc(w2,voice.phase2,hz2); float mix=current.p[P_OSC_MIX]/127.0f; float s=a*(1-mix)+b*mix; s += osc(1,voice.phaseSub,voice.currentHz*0.5f)*(current.p[P_SUB_LEVEL]/127.0f)*0.7f; s += randNoise()*(current.p[P_NOISE]/127.0f)*0.25f; s += (a*b)*(current.p[P_RING]/127.0f)*0.35f;
     float drive=1.0f+8.0f*std::pow(current.p[P_DRIVE]/127.0f,2.0f); s=std::tanh(s*drive)/std::tanh(drive);
-    float baseCut=35.0f*std::pow(18000.0f/35.0f,current.p[P_CUTOFF]/127.0f); float envSemis=(int(current.p[P_ENV_AMT])-64)*0.45f*voice.envMod; float lfoSemis=l2*(current.p[P_LFO2_DEPTH]/127.0f)*12.0f; float cutoff=std::clamp(baseCut*std::pow(2.0f,(envSemis+lfoSemis)/12.0f),30.0f,18000.0f); float f=2.0f*std::sin(kPi*cutoff/kRate); f=std::clamp(f,0.001f,1.8f); float q=0.55f+3.6f*(current.p[P_RESO]/127.0f); voice.lp1 += f*voice.bp; float hp=s-voice.lp1-q*voice.bp; voice.bp += f*hp; float filtered=voice.lp1; if(current.p[P_FILTER_SHAPE]>84)filtered=hp; else if(current.p[P_FILTER_SHAPE]>42)filtered=voice.bp; if(current.p[P_FILTER_SLOPE]){ voice.lp2 += f*(filtered-voice.lp2); filtered=voice.lp2; }
-    float vel=0.35f+0.65f*(voice.velocity/127.0f); return filtered*voice.envAmp*vel*(masterValue/1023.0f)*0.45f;
+
+    const float baseCut=35.0f*std::pow(18000.0f/35.0f,current.p[P_CUTOFF]/127.0f);
+    const float envSemis=(int(current.p[P_ENV_AMT])-64)*0.45f*voice.envMod;
+    const float lfoSemis=l2*(current.p[P_LFO2_DEPTH]/127.0f)*12.0f;
+    const float cutoff=std::clamp(baseCut*std::pow(2.0f,(envSemis+lfoSemis)/12.0f),30.0f,18000.0f);
+
+    // Topology-preserving-transform state-variable filter. Unlike the previous
+    // forward-Euler/Chamberlin form this remains stable when cutoff is swept
+    // rapidly near Nyquist while resonance is high.
+    const float g=std::tan(kPi*cutoff/float(kRate));
+    const float resNorm=current.p[P_RESO]/127.0f;
+    const float q=0.5f+9.5f*resNorm*resNorm;
+    const float damping=1.0f/q;
+    const float a1=1.0f/(1.0f+g*(g+damping));
+    const float a2=g*a1;
+    const float a3=g*a2;
+    const float ic1=voice.bp;
+    const float ic2=voice.lp1;
+    const float v3=s-ic2;
+    const float band=a1*ic1+a2*v3;
+    const float low=ic2+a2*ic1+a3*v3;
+    voice.bp=2.0f*band-ic1;
+    voice.lp1=2.0f*low-ic2;
+    const float high=s-damping*band-low;
+
+    float filtered=low;
+    if(current.p[P_FILTER_SHAPE]>84)filtered=high;
+    else if(current.p[P_FILTER_SHAPE]>42)filtered=band;
+
+    // Prototype 24 dB mode: a stable extra pole after the main SVF. A proper
+    // BSII-style four-pole model can replace this later without changing UI.
+    if(current.p[P_FILTER_SLOPE]){
+        const float alpha=1.0f-std::exp(-2.0f*kPi*cutoff/float(kRate));
+        voice.lp2 += alpha*(filtered-voice.lp2);
+        filtered=voice.lp2;
+    }
+
+    // A corrupted filter state must never permanently mute an instance.
+    if(!std::isfinite(voice.lp1)||!std::isfinite(voice.lp2)||!std::isfinite(voice.bp)||!std::isfinite(filtered)
+       ||std::fabs(voice.lp1)>1000.0f||std::fabs(voice.lp2)>1000.0f||std::fabs(voice.bp)>1000.0f){
+        resetFilter();
+        filtered=0.0f;
+    }
+
+    float vel=0.35f+0.65f*(voice.velocity/127.0f);
+    float result=filtered*voice.envAmp*vel*(masterValue/1023.0f)*0.45f;
+    if(!std::isfinite(result)){ resetFilter(); result=0.0f; }
+    return result;
 }
 }
 
@@ -135,7 +184,7 @@ static void b_render(uint32_t n){ n=std::min<uint32_t>(n,1024); for(uint32_t i=0
 static uint8_t* b_nor(){return reinterpret_cast<uint8_t*>(flash.data());} static uint32_t b_nor_size(){return uint32_t(sizeof(flash));} static void b_nor_erase(){std::memset(flash.data(),0,sizeof(flash)); for(int i=0;i<kPresetCount;++i)defaults(flash[size_t(i)],i);} static uint32_t b_flash_writes(){return flashWrites;}
 static void b_seed(uint32_t s){rngState=s?s:0x12345678u;} static void b_boot(){ bool blank=true; for(auto&pr:flash)if(pr.name[0]){blank=false;break;} if(blank)b_nor_erase();presetIndex=0;loadPreset();voice=Voice{};drawScreen(); }
 static void b_buttons(uint32_t m){buttonState=m;handleButtons(m);} static void b_keys(uint32_t m){ uint32_t changed=m^keyState; for(int i=0;i<27;++i)if(changed&(1u<<i)){int n=53+i;if(m&(1u<<i))noteOn(n,105);else noteOff(n);} keyState=m; }
-static void b_enc(uint32_t role,int32_t n){ if(role==0){page=std::clamp(page+n,0,8);} else if(role==1){page=std::clamp(page+n,0,8);} else if(role==2){presetIndex=(presetIndex+n)%kPresetCount;if(presetIndex<0)presetIndex+=kPresetCount;loadPreset();} else if(role>=3&&role<=6){int p=knobParam(int(role-3));current.p[p]=uint8_t(std::clamp(int(current.p[p])+int(n),0,127));} drawScreen(); }
+static void b_enc(uint32_t role,int32_t n){ if(role==0){page=std::clamp(page+n,0,8);} else if(role==1){page=std::clamp(page+n,0,8);} else if(role==2){presetIndex=(presetIndex+n)%kPresetCount;if(presetIndex<0)presetIndex+=kPresetCount;loadPreset();resetFilter();} else if(role>=3&&role<=6){int p=knobParam(int(role-3));current.p[p]=uint8_t(std::clamp(int(current.p[p])+int(n),0,127));} drawScreen(); }
 static void b_master(uint32_t v){masterValue=int(std::min<uint32_t>(v,1023));}
 static uint32_t b_midi(uint32_t st,uint32_t d1,uint32_t d2){uint8_t s=uint8_t(st); if((s&0xF0)==0x90&&d2>0)noteOn(int(d1),int(d2)); else if((s&0xF0)==0x80||((s&0xF0)==0x90&&d2==0))noteOff(int(d1)); else if((s&0xF0)==0xB0){if(d1==16)current.p[P_CUTOFF]=uint8_t(d2);else if(d1==82)current.p[P_RESO]=uint8_t(d2);else if(d1==20)current.p[P_DRIVE]=uint8_t(d2);drawScreen();} return 0;}
 static uint16_t* b_screen(){return screen.data();} static uint32_t b_lit(){return keyState;} static uint32_t b_mid(){return 0;} static uint32_t b_rate(){return kRate;}
