@@ -54,6 +54,9 @@ jobs:
       - name: Patch JIANT host code for Windows
         run: python .chatgpt/jiant-vst/patch_windows_host.py hostsrc/JIANT
 
+      - name: Fix Firmware Host JUCE compile detail
+        run: python .chatgpt/fm1-host/fix_compile.py hostsrc/Plugin.cpp
+
       - uses: actions/download-artifact@v4
         with:
           name: jiant-generated-assets-host
