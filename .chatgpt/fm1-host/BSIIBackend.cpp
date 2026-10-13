@@ -12,6 +12,7 @@ constexpr uint32_t kRate = 44100;
 constexpr int kScreenW = 240, kScreenH = 240;
 constexpr int kPresetCount = 128;
 constexpr int kParamCount = 32;
+constexpr int kDiscreteStepThreshold = 4;
 constexpr float kPi = 3.14159265358979323846f;
 
 enum Param {
@@ -59,6 +60,8 @@ uint32_t keyState = 0;
 int masterValue = 700;
 float lfo1Phase = 0, lfo2Phase = 0;
 uint32_t rngState = 0x12345678u;
+std::array<int,4> discreteAccum{};
+std::array<int,4> discreteParam{{-1,-1,-1,-1}};
 
 uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
     uint16_t v = uint16_t(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
@@ -89,12 +92,14 @@ void defaults(Preset& p,int i){ std::fill(std::begin(p.p),std::end(p.p),64); p.p
 void loadPreset(){ current=flash[size_t(presetIndex)]; }
 void savePreset(){ flash[size_t(presetIndex)]=current; ++flashWrites; }
 
+void resetDiscreteDetents(){discreteAccum.fill(0);discreteParam.fill(-1);}
 int subPageCount(int c){ switch(c){case C_OSC:return 2;case C_FILTER:return 2;case C_ENV:return 2;default:return 1;} }
 int wrapIndex(int v,int count){ if(count<=0)return 0; v%=count; if(v<0)v+=count; return v; }
 void syncPage(){
     static const int firstPage[C_COUNT]={0,1,3,4,6,8};
     subPage=wrapIndex(subPage,subPageCount(category));
     page=firstPage[category]+subPage;
+    resetDiscreteDetents();
 }
 void setCategory(int c,int sub=0){ category=wrapIndex(c,C_COUNT); subPage=sub; syncPage(); }
 void nextSubPage(){ subPage=wrapIndex(subPage+1,subPageCount(category)); syncPage(); }
@@ -140,11 +145,29 @@ void formatParamValue(int p,char* b,size_t n){
     std::snprintf(b,n,"%d%%",percent(v));
 }
 
-void adjustParam(int p,int delta){
-    auto stepped=[&](int states){int state=0;if(p==P_FILTER_TYPE||p==P_FILTER_SLOPE)state=current.p[p]?1:0;else if(p==P_FILTER_SHAPE)state=current.p[p]>84?2:current.p[p]>42?1:0;else state=std::min(states-1,int(current.p[p])/32);state=std::clamp(state+delta,0,states-1);if(p==P_FILTER_TYPE||p==P_FILTER_SLOPE)current.p[p]=state?127:0;else if(p==P_FILTER_SHAPE)current.p[p]=state==0?0:state==1?64:127;else current.p[p]=uint8_t(state*32);};
-    if(p==P_OSC1_WAVE||p==P_OSC2_WAVE||p==P_OSC1_RANGE||p==P_OSC2_RANGE){stepped(4);return;}
-    if(p==P_FILTER_TYPE||p==P_FILTER_SLOPE){stepped(2);return;}
-    if(p==P_FILTER_SHAPE){stepped(3);return;}
+bool isDiscreteParam(int p){return p==P_OSC1_WAVE||p==P_OSC2_WAVE||p==P_OSC1_RANGE||p==P_OSC2_RANGE||p==P_FILTER_TYPE||p==P_FILTER_SHAPE||p==P_FILTER_SLOPE;}
+void applyDiscreteState(int p,int delta){
+    int states=(p==P_FILTER_TYPE||p==P_FILTER_SLOPE)?2:(p==P_FILTER_SHAPE?3:4);
+    int state=0;
+    if(p==P_FILTER_TYPE||p==P_FILTER_SLOPE)state=current.p[p]?1:0;
+    else if(p==P_FILTER_SHAPE)state=current.p[p]>84?2:current.p[p]>42?1:0;
+    else state=std::min(states-1,int(current.p[p])/32);
+    state=std::clamp(state+delta,0,states-1);
+    if(p==P_FILTER_TYPE||p==P_FILTER_SLOPE)current.p[p]=state?127:0;
+    else if(p==P_FILTER_SHAPE)current.p[p]=state==0?0:state==1?64:127;
+    else current.p[p]=uint8_t(state*32);
+}
+void adjustParam(int encoder,int p,int delta){
+    if(encoder<0||encoder>=4||delta==0)return;
+    if(isDiscreteParam(p)){
+        if(discreteParam[size_t(encoder)]!=p){discreteParam[size_t(encoder)]=p;discreteAccum[size_t(encoder)]=0;}
+        int& accum=discreteAccum[size_t(encoder)];accum+=delta;int steps=0;
+        while(accum>=kDiscreteStepThreshold){++steps;accum-=kDiscreteStepThreshold;}
+        while(accum<=-kDiscreteStepThreshold){--steps;accum+=kDiscreteStepThreshold;}
+        if(steps!=0)applyDiscreteState(p,steps);
+        return;
+    }
+    discreteParam[size_t(encoder)]=p;discreteAccum[size_t(encoder)]=0;
     current.p[p]=uint8_t(std::clamp(int(current.p[p])+delta,0,127));
 }
 
@@ -211,8 +234,8 @@ static void b_buttons(uint32_t m){buttonState=m;handleButtons(m);}static void b_
 static void b_enc(uint32_t role,int32_t n){
     if(role==0){category=wrapIndex(category+int(n),C_COUNT);subPage=0;syncPage();}
     else if(role==1){subPage=wrapIndex(subPage+int(n),subPageCount(category));syncPage();}
-    else if(role==2){presetIndex=(presetIndex+n)%kPresetCount;if(presetIndex<0)presetIndex+=kPresetCount;loadPreset();resetFilter();}
-    else if(role>=3&&role<=6){adjustParam(knobParam(int(role-3)),int(n));}
+    else if(role==2){presetIndex=(presetIndex+n)%kPresetCount;if(presetIndex<0)presetIndex+=kPresetCount;loadPreset();resetFilter();resetDiscreteDetents();}
+    else if(role>=3&&role<=6){int k=int(role-3);adjustParam(k,knobParam(k),int(n));}
     drawScreen();
 }
 static void b_master(uint32_t v){masterValue=int(std::min<uint32_t>(v,1023));}
