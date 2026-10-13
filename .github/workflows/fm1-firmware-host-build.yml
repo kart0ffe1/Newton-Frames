@@ -58,6 +58,9 @@ jobs:
       - name: Fix Firmware Host JUCE compile detail
         run: python .chatgpt/fm1-host/fix_compile.py hostsrc/Plugin.cpp
 
+      - name: Make non-master knobs endless encoders
+        run: python .chatgpt/fm1-host/patch_endless_encoders.py hostsrc/Plugin.cpp
+
       - uses: actions/download-artifact@v4
         with:
           name: jiant-generated-assets-host
