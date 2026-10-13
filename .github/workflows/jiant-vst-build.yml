@@ -14,10 +14,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Fetch JIANT
-        run: git clone --depth 1 https://github.com/juanjiant-bit/JIANT.git JIANT
-      - name: Generate firmware assets
+      - name: Fetch and generate JIANT assets
         run: |
+          git clone --depth 1 https://github.com/juanjiant-bit/JIANT.git JIANT
           sudo apt-get update -qq
           sudo apt-get install -y -qq libraqm0
           python -m pip install --disable-pip-version-check pillow fonttools
@@ -37,6 +36,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Fetch JIANT and JUCE
         shell: bash
@@ -48,39 +50,7 @@ jobs:
           cp .chatgpt/jiant-vst/Plugin.cpp vstsrc/Plugin.cpp
 
       - name: Patch host-only POSIX helpers for Windows
-        shell: pwsh
-        run: |
-          $p = "vstsrc/JIANT/tests/hostsim.c"
-          $s = Get-Content $p -Raw
-          $old = @'
-#include <stdio.h>
-#include <unistd.h>
-#include <sys/wait.h>
-#include <time.h>
-'@
-          $new = @'
-#include <stdio.h>
-#ifdef _WIN32
-#include <time.h>
-typedef int pid_t;
-#define fork() (-1)
-#define waitpid(pid, status, options) (*(status) = 0, (pid))
-#define WIFEXITED(status) 1
-#define WEXITSTATUS(status) 0
-#define _exit(code) ((void)(code))
-#ifndef CLOCK_MONOTONIC
-#define CLOCK_MONOTONIC 1
-#endif
-#define clock_gettime(clock_id, ts) ((void)(clock_id), (ts)->tv_sec = 0, (ts)->tv_nsec = 0, 0)
-#else
-#include <unistd.h>
-#include <sys/wait.h>
-#include <time.h>
-#endif
-'@
-          if (-not $s.Contains($old)) { throw "hostsim include block changed upstream" }
-          $s = $s.Replace($old, $new)
-          Set-Content -Path $p -Value $s -NoNewline
+        run: python .chatgpt/jiant-vst/patch_windows_host.py vstsrc/JIANT
 
       - uses: actions/download-artifact@v4
         with:
@@ -94,25 +64,17 @@ typedef int pid_t;
           if (!(Test-Path "vstsrc/JIANT/build/gen/ui_fonts.h")) { throw "JIANT generated fonts missing" }
 
       - name: Configure (Visual Studio 2022 + ClangCL)
-        shell: pwsh
-        run: |
-          cmake -S vstsrc -B vstsrc/build-vst -G "Visual Studio 17 2022" -A x64 -T ClangCL
+        run: cmake -S vstsrc -B vstsrc/build-vst -G "Visual Studio 17 2022" -A x64 -T ClangCL
 
       - name: Build VST3
-        shell: pwsh
-        run: |
-          cmake --build vstsrc/build-vst --config Release --target JIANTFM_VST3 --parallel
+        run: cmake --build vstsrc/build-vst --config Release --target JIANTFM_VST3 --parallel
 
       - name: Package VST3
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $vst3 = "vstsrc/build-vst/JIANTFM_artefacts/Release/VST3/JIANT FM.vst3"
-          if (!(Test-Path $vst3)) {
-            Write-Host "Build tree:"
-            Get-ChildItem vstsrc/build-vst -Recurse -Filter "*.vst3" | ForEach-Object { Write-Host $_.FullName }
-            throw "VST3 bundle not found"
-          }
+          if (!(Test-Path $vst3)) { throw "VST3 bundle not found" }
           $binary = Join-Path $vst3 "Contents/x86_64-win/JIANT FM.vst3"
           if (!(Test-Path $binary)) { throw "VST3 Windows binary missing" }
           New-Item -ItemType Directory -Force dist | Out-Null
