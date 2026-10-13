@@ -6,6 +6,9 @@ if len(sys.argv) != 2:
     raise SystemExit("usage: patch_windows_host.py PATH/TO/JIANT")
 
 root = Path(sys.argv[1])
+
+# 1) hostsim.c uses POSIX-only test helpers. They are never used by the VST wrapper,
+# but the translation unit still needs Windows-compatible declarations.
 p = root / "tests" / "hostsim.c"
 s = p.read_text(encoding="utf-8")
 old = '''#include <stdio.h>\n#include <unistd.h>\n#include <sys/wait.h>\n#include <time.h>\n'''
@@ -62,4 +65,16 @@ static int jiant_test_clock_gettime(int clock_id, struct timespec *ts)
 if old not in s:
     raise SystemExit("hostsim include block changed upstream")
 p.write_text(s.replace(old, new, 1), encoding="utf-8")
+print(f"patched {p}")
+
+# 2) Current JIANT main.c declares extra linker regions for low/hot RAM. The web
+# emulator bypasses the hardware reset/copy path, so dummy host symbols are enough
+# to satisfy the native Windows compilation just like the existing _rt symbols.
+p = root / "web" / "emu" / "felucca_web.c"
+s = p.read_text(encoding="utf-8")
+needle = '''uint32_t _pool_start[1], _pool_end[1], _rt_start[1], _rt_end[1], _rt_load[1];\n'''
+replacement = '''uint32_t _pool_start[1], _pool_end[1], _rt_start[1], _rt_end[1], _rt_load[1];\nuint32_t _low_start[1], _low_end[1];\nuint32_t _hot_start[1], _hot_end[1], _hot_load[1];\n'''
+if needle not in s:
+    raise SystemExit("felucca_web linker-symbol block changed upstream")
+p.write_text(s.replace(needle, replacement, 1), encoding="utf-8")
 print(f"patched {p}")
