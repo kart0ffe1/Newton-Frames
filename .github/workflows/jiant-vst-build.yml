@@ -59,6 +59,9 @@ jobs:
       - name: Apply UI v3 latch and keyboard-focus fixes
         run: python .chatgpt/jiant-vst/patch_ui_v3.py vstsrc/Plugin.cpp
 
+      - name: Add global cross-project flash persistence
+        run: python .chatgpt/jiant-vst/patch_global_flash.py vstsrc/Plugin.cpp
+
       - uses: actions/download-artifact@v4
         with:
           name: jiant-generated-assets
