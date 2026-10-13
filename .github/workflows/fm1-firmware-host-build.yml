@@ -2,7 +2,7 @@ name: FM1 Firmware Host Windows VST3
 
 on:
   push:
-    branches: ["chatgpt/fm1-firmware-host"]
+    branches: ["chatgpt/fm1-firmware-host", "chatgpt/bsii-firmware-prototype"]
   workflow_dispatch:
 
 jobs:
@@ -50,6 +50,7 @@ jobs:
           cp .chatgpt/fm1-host/Plugin.cpp hostsrc/Plugin.cpp
           cp .chatgpt/fm1-host/FirmwareApi.h hostsrc/FirmwareApi.h
           cp .chatgpt/fm1-host/JiantBackend.cpp hostsrc/JiantBackend.cpp
+          cp .chatgpt/fm1-host/BSIIBackend.cpp hostsrc/BSIIBackend.cpp
 
       - name: Patch JIANT host code for Windows
         run: python .chatgpt/jiant-vst/patch_windows_host.py hostsrc/JIANT
@@ -65,33 +66,44 @@ jobs:
       - name: Configure
         run: cmake -S hostsrc -B hostsrc/build -G "Visual Studio 17 2022" -A x64 -T ClangCL
 
-      - name: Build JIANT firmware backend
-        run: cmake --build hostsrc/build --config Release --target JIANTBackend --parallel
+      - name: Build firmware backends
+        run: |
+          cmake --build hostsrc/build --config Release --target JIANTBackend --parallel
+          cmake --build hostsrc/build --config Release --target BSIIBackend --parallel
 
       - name: Build Firmware Host VST3
         run: cmake --build hostsrc/build --config Release --target FM1FirmwareHost_VST3 --parallel
 
-      - name: Package bundled JIANT backend into VST3
+      - name: Package bundled firmware backends into VST3
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $vst3 = "hostsrc/build/FM1FirmwareHost_artefacts/Release/VST3/FM1 Firmware Host.vst3"
           if (!(Test-Path $vst3)) { throw "Firmware Host VST3 bundle not found" }
-          $backend = "hostsrc/build/firmware-bundles/JIANT/fm1_backend.dll"
-          if (!(Test-Path $backend)) { throw "JIANT backend DLL not found" }
-          $fwdir = Join-Path $vst3 "Contents/Resources/Firmwares/JIANT"
-          New-Item -ItemType Directory -Force $fwdir | Out-Null
-          Copy-Item $backend (Join-Path $fwdir "fm1_backend.dll") -Force
+
+          $jiant = "hostsrc/build/firmware-bundles/JIANT/fm1_backend.dll"
+          $bsii = "hostsrc/build/firmware-bundles/BSII-Prototype/fm1_backend.dll"
+          if (!(Test-Path $jiant)) { throw "JIANT backend DLL not found" }
+          if (!(Test-Path $bsii)) { throw "BSII backend DLL not found" }
+
+          $jiantDir = Join-Path $vst3 "Contents/Resources/Firmwares/JIANT"
+          $bsiiDir = Join-Path $vst3 "Contents/Resources/Firmwares/BSII-Prototype"
+          New-Item -ItemType Directory -Force $jiantDir | Out-Null
+          New-Item -ItemType Directory -Force $bsiiDir | Out-Null
+          Copy-Item $jiant (Join-Path $jiantDir "fm1_backend.dll") -Force
+          Copy-Item $bsii (Join-Path $bsiiDir "fm1_backend.dll") -Force
+
           $binary = Join-Path $vst3 "Contents/x86_64-win/FM1 Firmware Host.vst3"
           if (!(Test-Path $binary)) { throw "Windows VST3 binary missing" }
           New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive -Path $vst3 -DestinationPath "dist/FM1-Firmware-Host-Windows-VST3.zip" -Force
+          Compress-Archive -Path $vst3 -DestinationPath "dist/FM1-Firmware-Host-BSII-Prototype-Windows-VST3.zip" -Force
           Get-FileHash $binary -Algorithm SHA256 | Format-List
-          Get-FileHash $backend -Algorithm SHA256 | Format-List
-          Get-FileHash "dist/FM1-Firmware-Host-Windows-VST3.zip" -Algorithm SHA256 | Format-List
+          Get-FileHash $jiant -Algorithm SHA256 | Format-List
+          Get-FileHash $bsii -Algorithm SHA256 | Format-List
+          Get-FileHash "dist/FM1-Firmware-Host-BSII-Prototype-Windows-VST3.zip" -Algorithm SHA256 | Format-List
 
       - uses: actions/upload-artifact@v4
         with:
-          name: FM1-Firmware-Host-Windows-VST3
-          path: dist/FM1-Firmware-Host-Windows-VST3.zip
+          name: FM1-Firmware-Host-BSII-Prototype-Windows-VST3
+          path: dist/FM1-Firmware-Host-BSII-Prototype-Windows-VST3.zip
           if-no-files-found: error
