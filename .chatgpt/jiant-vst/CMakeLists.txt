@@ -50,6 +50,8 @@ endif()
 target_compile_definitions(JIANTFM PRIVATE
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
+    JUCE_USE_WEBP=0
+    JUCE_INCLUDE_WEBPLIB_CODE=0
 )
 
 target_link_libraries(JIANTFM PRIVATE
