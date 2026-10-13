@@ -6,15 +6,37 @@ on:
   workflow_dispatch:
 
 jobs:
+  generate-jiant-assets:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Fetch JIANT
+        run: git clone --depth 1 https://github.com/juanjiant-bit/JIANT.git JIANT
+      - name: Generate firmware assets
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libraqm0
+          python -m pip install --disable-pip-version-check pillow fonttools
+          cd JIANT
+          python -c "from tools import build; build.generate()"
+          test -f build/gen/felucca_tables.h
+          test -f build/gen/ui_fonts.h
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jiant-generated-assets
+          path: JIANT/build/gen
+          if-no-files-found: error
+
   build-windows-vst3:
+    needs: generate-jiant-assets
     runs-on: windows-2022
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
 
       - name: Fetch JIANT and JUCE
         shell: bash
@@ -25,33 +47,35 @@ jobs:
           cp .chatgpt/jiant-vst/CMakeLists.txt vstsrc/CMakeLists.txt
           cp .chatgpt/jiant-vst/Plugin.cpp vstsrc/Plugin.cpp
 
-      - name: Generate JIANT firmware assets
+      - uses: actions/download-artifact@v4
+        with:
+          name: jiant-generated-assets
+          path: vstsrc/JIANT/build/gen
+
+      - name: Check JIANT assets
         shell: pwsh
         run: |
-          python -m pip install --disable-pip-version-check pillow fonttools
-          Push-Location vstsrc/JIANT
-          python -c "from tools import build; build.generate()"
-          Pop-Location
           if (!(Test-Path "vstsrc/JIANT/build/gen/felucca_tables.h")) { throw "JIANT generated tables missing" }
+          if (!(Test-Path "vstsrc/JIANT/build/gen/ui_fonts.h")) { throw "JIANT generated fonts missing" }
 
       - name: Configure (Visual Studio 2022 + ClangCL)
         shell: pwsh
         run: |
-          cmake -S vstsrc -B vstsrc/build -G "Visual Studio 17 2022" -A x64 -T ClangCL
+          cmake -S vstsrc -B vstsrc/build-vst -G "Visual Studio 17 2022" -A x64 -T ClangCL
 
       - name: Build VST3
         shell: pwsh
         run: |
-          cmake --build vstsrc/build --config Release --target JIANTFM_VST3 --parallel
+          cmake --build vstsrc/build-vst --config Release --target JIANTFM_VST3 --parallel
 
       - name: Package VST3
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $vst3 = "vstsrc/build/JIANTFM_artefacts/Release/VST3/JIANT FM.vst3"
+          $vst3 = "vstsrc/build-vst/JIANTFM_artefacts/Release/VST3/JIANT FM.vst3"
           if (!(Test-Path $vst3)) {
             Write-Host "Build tree:"
-            Get-ChildItem vstsrc/build -Recurse -Filter "*.vst3" | ForEach-Object { Write-Host $_.FullName }
+            Get-ChildItem vstsrc/build-vst -Recurse -Filter "*.vst3" | ForEach-Object { Write-Host $_.FullName }
             throw "VST3 bundle not found"
           }
           $binary = Join-Path $vst3 "Contents/x86_64-win/JIANT FM.vst3"
