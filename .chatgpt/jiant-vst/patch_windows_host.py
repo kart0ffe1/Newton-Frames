@@ -9,7 +9,56 @@ root = Path(sys.argv[1])
 p = root / "tests" / "hostsim.c"
 s = p.read_text(encoding="utf-8")
 old = '''#include <stdio.h>\n#include <unistd.h>\n#include <sys/wait.h>\n#include <time.h>\n'''
-new = '''#include <stdio.h>\n#ifdef _WIN32\n#include <time.h>\ntypedef int pid_t;\n#define fork() (-1)\n#define waitpid(pid, status, options) (*(status) = 0, (pid))\n#define WIFEXITED(status) 1\n#define WEXITSTATUS(status) 0\n#define _exit(code) ((void)(code))\n#ifndef CLOCK_MONOTONIC\n#define CLOCK_MONOTONIC 1\n#endif\n#define clock_gettime(clock_id, ts) ((void)(clock_id), (ts)->tv_sec = 0, (ts)->tv_nsec = 0, 0)\n#else\n#include <unistd.h>\n#include <sys/wait.h>\n#include <time.h>\n#endif\n'''
+new = r'''#include <stdio.h>
+#ifdef _WIN32
+#include <time.h>
+#include <stdlib.h>
+typedef int pid_t;
+static pid_t jiant_test_fork(void) { return -1; }
+static int jiant_test_waitpid(pid_t pid, int *status, int options)
+{
+    (void)options;
+    if (status) *status = 0;
+    return pid;
+}
+static int jiant_test_pipe(int p[2])
+{
+    if (p) p[0] = p[1] = -1;
+    return -1;
+}
+static int jiant_test_write(int fd, const void *buf, unsigned int n)
+{
+    (void)fd; (void)buf; return (int)n;
+}
+static int jiant_test_read(int fd, void *buf, unsigned int n)
+{
+    (void)fd; (void)buf; (void)n; return 0;
+}
+static int jiant_test_close(int fd) { (void)fd; return 0; }
+#define fork() jiant_test_fork()
+#define waitpid(pid, status, options) jiant_test_waitpid((pid), (status), (options))
+#define pipe(p) jiant_test_pipe(p)
+#define write(fd, buf, n) jiant_test_write((fd), (buf), (unsigned int)(n))
+#define read(fd, buf, n) jiant_test_read((fd), (buf), (unsigned int)(n))
+#define close(fd) jiant_test_close(fd)
+#define WIFEXITED(status) 1
+#define WEXITSTATUS(status) 0
+#ifndef CLOCK_MONOTONIC
+#define CLOCK_MONOTONIC 1
+#endif
+static int jiant_test_clock_gettime(int clock_id, struct timespec *ts)
+{
+    (void)clock_id;
+    if (ts) { ts->tv_sec = 0; ts->tv_nsec = 0; }
+    return 0;
+}
+#define clock_gettime(clock_id, ts) jiant_test_clock_gettime((clock_id), (ts))
+#else
+#include <unistd.h>
+#include <sys/wait.h>
+#include <time.h>
+#endif
+'''
 if old not in s:
     raise SystemExit("hostsim include block changed upstream")
 p.write_text(s.replace(old, new, 1), encoding="utf-8")
