@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(FM1FirmwareHost VERSION 0.1.0 LANGUAGES C CXX)
+project(FM1FirmwareHost VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -63,4 +63,16 @@ set_target_properties(JIANTBackend PROPERTIES
     PREFIX ""
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/firmware-bundles/JIANT"
     LIBRARY_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/firmware-bundles/JIANT"
+)
+
+add_library(BSIIBackend SHARED BSIIBackend.cpp)
+target_include_directories(BSIIBackend PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+if(MSVC)
+    target_compile_options(BSIIBackend PRIVATE /FIcstdio)
+endif()
+set_target_properties(BSIIBackend PROPERTIES
+    OUTPUT_NAME "fm1_backend"
+    PREFIX ""
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/firmware-bundles/BSII-Prototype"
+    LIBRARY_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/firmware-bundles/BSII-Prototype"
 )
