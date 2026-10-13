@@ -1,0 +1,94 @@
+name: FM1 Firmware Host Windows VST3
+
+on:
+  push:
+    branches: ["chatgpt/fm1-firmware-host"]
+  workflow_dispatch:
+
+jobs:
+  generate-jiant-assets:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Fetch and generate JIANT assets
+        run: |
+          git clone --depth 1 https://github.com/juanjiant-bit/JIANT.git JIANT
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libraqm0
+          python -m pip install --disable-pip-version-check pillow fonttools
+          cd JIANT
+          python -c "from tools import build; build.generate()"
+          test -f build/gen/felucca_tables.h
+          test -f build/gen/ui_fonts.h
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jiant-generated-assets-host
+          path: JIANT/build/gen
+          if-no-files-found: error
+
+  build-windows-vst3:
+    needs: generate-jiant-assets
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fetch JIANT and JUCE
+        shell: bash
+        run: |
+          mkdir hostsrc
+          git clone --depth 1 https://github.com/juanjiant-bit/JIANT.git hostsrc/JIANT
+          git clone --depth 1 https://github.com/juce-framework/JUCE.git hostsrc/JUCE
+          cp .chatgpt/fm1-host/CMakeLists.txt hostsrc/CMakeLists.txt
+          cp .chatgpt/fm1-host/Plugin.cpp hostsrc/Plugin.cpp
+          cp .chatgpt/fm1-host/FirmwareApi.h hostsrc/FirmwareApi.h
+          cp .chatgpt/fm1-host/JiantBackend.cpp hostsrc/JiantBackend.cpp
+
+      - name: Patch JIANT host code for Windows
+        run: python .chatgpt/jiant-vst/patch_windows_host.py hostsrc/JIANT
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: jiant-generated-assets-host
+          path: hostsrc/JIANT/build/gen
+
+      - name: Configure
+        run: cmake -S hostsrc -B hostsrc/build -G "Visual Studio 17 2022" -A x64 -T ClangCL
+
+      - name: Build JIANT firmware backend
+        run: cmake --build hostsrc/build --config Release --target JIANTBackend --parallel
+
+      - name: Build Firmware Host VST3
+        run: cmake --build hostsrc/build --config Release --target FM1FirmwareHost_VST3 --parallel
+
+      - name: Package bundled JIANT backend into VST3
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $vst3 = "hostsrc/build/FM1FirmwareHost_artefacts/Release/VST3/FM1 Firmware Host.vst3"
+          if (!(Test-Path $vst3)) { throw "Firmware Host VST3 bundle not found" }
+          $backend = "hostsrc/build/firmware-bundles/JIANT/fm1_backend.dll"
+          if (!(Test-Path $backend)) { throw "JIANT backend DLL not found" }
+          $fwdir = Join-Path $vst3 "Contents/Resources/Firmwares/JIANT"
+          New-Item -ItemType Directory -Force $fwdir | Out-Null
+          Copy-Item $backend (Join-Path $fwdir "fm1_backend.dll") -Force
+          $binary = Join-Path $vst3 "Contents/x86_64-win/FM1 Firmware Host.vst3"
+          if (!(Test-Path $binary)) { throw "Windows VST3 binary missing" }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path $vst3 -DestinationPath "dist/FM1-Firmware-Host-Windows-VST3.zip" -Force
+          Get-FileHash $binary -Algorithm SHA256 | Format-List
+          Get-FileHash $backend -Algorithm SHA256 | Format-List
+          Get-FileHash "dist/FM1-Firmware-Host-Windows-VST3.zip" -Algorithm SHA256 | Format-List
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FM1-Firmware-Host-Windows-VST3
+          path: dist/FM1-Firmware-Host-Windows-VST3.zip
+          if-no-files-found: error
