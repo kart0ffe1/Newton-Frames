@@ -47,6 +47,41 @@ jobs:
           cp .chatgpt/jiant-vst/CMakeLists.txt vstsrc/CMakeLists.txt
           cp .chatgpt/jiant-vst/Plugin.cpp vstsrc/Plugin.cpp
 
+      - name: Patch host-only POSIX helpers for Windows
+        shell: pwsh
+        run: |
+          $p = "vstsrc/JIANT/tests/hostsim.c"
+          $s = Get-Content $p -Raw
+          $old = @'
+#include <stdio.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <time.h>
+'@
+          $new = @'
+#include <stdio.h>
+#ifdef _WIN32
+#include <time.h>
+typedef int pid_t;
+#define fork() (-1)
+#define waitpid(pid, status, options) (*(status) = 0, (pid))
+#define WIFEXITED(status) 1
+#define WEXITSTATUS(status) 0
+#define _exit(code) ((void)(code))
+#ifndef CLOCK_MONOTONIC
+#define CLOCK_MONOTONIC 1
+#endif
+#define clock_gettime(clock_id, ts) ((void)(clock_id), (ts)->tv_sec = 0, (ts)->tv_nsec = 0, 0)
+#else
+#include <unistd.h>
+#include <sys/wait.h>
+#include <time.h>
+#endif
+'@
+          if (-not $s.Contains($old)) { throw "hostsim include block changed upstream" }
+          $s = $s.Replace($old, $new)
+          Set-Content -Path $p -Value $s -NoNewline
+
       - uses: actions/download-artifact@v4
         with:
           name: jiant-generated-assets
