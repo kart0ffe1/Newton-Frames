@@ -61,6 +61,9 @@ jobs:
       - name: Make non-master knobs endless encoders
         run: python .chatgpt/fm1-host/patch_endless_encoders.py hostsrc/Plugin.cpp
 
+      - name: Add separate BSII oscillator mixer levels
+        run: python .chatgpt/fm1-host/patch_bsii_mixer_levels.py hostsrc/BSIIBackend.cpp
+
       - uses: actions/download-artifact@v4
         with:
           name: jiant-generated-assets-host
