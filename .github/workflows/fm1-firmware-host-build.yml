@@ -67,6 +67,9 @@ jobs:
       - name: Add per-oscillator subs and filter response pass
         run: python .chatgpt/fm1-host/patch_bsii_subs_filter.py hostsrc/BSIIBackend.cpp
 
+      - name: Add BSII-style arp and sequencer
+        run: python .chatgpt/fm1-host/patch_bsii_arp_seq.py hostsrc/BSIIBackend.cpp
+
       - uses: actions/download-artifact@v4
         with:
           name: jiant-generated-assets-host
