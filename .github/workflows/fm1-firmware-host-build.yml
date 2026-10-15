@@ -55,6 +55,9 @@ jobs:
       - name: Patch JIANT host code for Windows
         run: python .chatgpt/jiant-vst/patch_windows_host.py hostsrc/JIANT
 
+      - name: Enable external MIDI in JIANT stopped STEP recording
+        run: python .chatgpt/fm1-host/patch_jiant_midi_step_record.py hostsrc/JIANT/firmware/src/ui_input.c
+
       - name: Fix Firmware Host JUCE compile detail
         run: python .chatgpt/fm1-host/fix_compile.py hostsrc/Plugin.cpp
 
